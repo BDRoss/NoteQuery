@@ -1,0 +1,8 @@
+- Everything
+- Extract watcher setup to a method
+- Sync files in watched directories with mongoDB on startup
+ - Compare lastModified in mongoDB to lastModified on disk
+ - This should happen whenever _directoriesToWatch is changed
+- Set up local MongoDB
+- Connect to local MongoDB
+- Set up logging
