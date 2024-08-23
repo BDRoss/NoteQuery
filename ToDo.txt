@@ -6,3 +6,6 @@
 - Set up local MongoDB
 - Connect to local MongoDB
 - Set up logging
+- Add an option to watch all subdirectories of a watched directory
+ - Fun lil UI with checkboxes
+ - Recursive call to SetUpWatchers with al directories found in parent directory
