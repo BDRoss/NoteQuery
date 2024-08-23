@@ -2,17 +2,27 @@ using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Hosting;
+using Microsoft.VisualBasic;
+using Newtonsoft.Json;
 
-namespace NoteQuery;
+namespace NoteQuery.Workers;
 
 public class Worker : BackgroundService
 {
+    private enum ChangeType
+    {
+        Created,
+        Changed,
+        Deleted,
+        Renamed
+    }
+    
     private readonly ILogger<Worker> _logger;
-    private readonly string[] _directoriesToWatch = [];
+    private FileSystemWatcher? _configWatcher;
     private readonly List<FileSystemWatcher> _watchers = [];
-    private string _configPath;
+    private readonly string _configPath;
 
-    public Worker(ILogger<Worker> logger, string configPath = "config.json")
+    public Worker(ILogger<Worker> logger, string configPath = ".\\config.csv")
     {
         _logger = logger;
         _configPath = configPath;
@@ -25,51 +35,168 @@ public class Worker : BackgroundService
             _logger.LogInformation("Worker starting at: {time}", DateTimeOffset.Now);
         }
         
-        // Load configuration and set directories to watch
-        // configuration load will also happen when oonfigPath has a change detected
+        SetUpConfigWatcher();
+        SetUpWatchers();
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            // Extract this to method to be recalled whenever configPath changes
-            foreach (var directory in _directoriesToWatch)
-            {
-                if (Directory.Exists(directory))
-                {
-                    var watcher = new FileSystemWatcher
-                    {
-                        Path = directory,
-                        NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName | NotifyFilters.DirectoryName,
-                        Filter = "*.*"
-                    };
-
-                    // Event handlers
-                    watcher.Changed += OnChanged;
-                    watcher.Created += OnChanged;
-                    watcher.Deleted += OnChanged;
-                    watcher.Renamed += OnRenamed;
-
-                    // Start monitoring
-                    watcher.EnableRaisingEvents = true;
-
-                    _watchers.Add(watcher);
-                    _logger.LogInformation($"Started watching directory: {directory}");
-                }
-                else
-                {
-                    Console.WriteLine($"Directory {directory} does not exist.");
-                }
-            }
-            
             await Task.Delay(1000, stoppingToken);
         }
+        _logger.LogInformation("Worker stopping at: {time}", DateTimeOffset.Now);
     }
-    private void OnChanged(object source, FileSystemEventArgs e) =>
-        _logger.LogInformation($"File: {e.FullPath} {e.ChangeType}, Last Updated: {File.GetLastWriteTime(e.FullPath)}");
 
-    private void OnRenamed(object source, RenamedEventArgs e) =>
+    #region FileSystemWatcher
+    private void OnChanged(object source, FileSystemEventArgs e)
+    {
+        // Ignoring changes to directories
+        if (!File.Exists(e.FullPath)) return;
         _logger.LogInformation(
-            $"File renamed from {e.OldFullPath} to {e.FullPath}, Last Updated: {File.GetLastWriteTime(e.FullPath)}");
+            $"File: {e.FullPath} {e.ChangeType}, Last Updated: {File.GetLastWriteTime(e.FullPath)}");
+        UpdateMongo(e.FullPath, ChangeType.Changed);
+    }
 
+
+    private void OnRenamed(object source, RenamedEventArgs e)
+    {
+        // Ignoring changes to directories
+        if(File.Exists(e.FullPath))
+            _logger.LogInformation(
+                $"File renamed from {e.OldFullPath} to {e.FullPath}, Last Updated: {File.GetLastWriteTime(e.FullPath)}");
+    }
+    #endregion
+
+    #region ConfigWatcher
+    private void ConfigOnChanged(object source, FileSystemEventArgs e)
+    {
+        _logger.LogInformation($"Config file: {e.FullPath} {e.ChangeType}, Last Updated: {File.GetLastWriteTime(e.FullPath)}");
+        SetUpWatchers();
+    }
+
+    private void ConfigOnDeleted(object source, FileSystemEventArgs e)
+    {
+        _logger.LogInformation(
+            $"Config file deleted, Last Updated: {File.GetLastWriteTime(e.FullPath)}");
+        _logger.LogError("Config file deleted. NoteQuery service will shut down.");
+        throw new FileNotFoundException("Config file deleted.");
+    }
+
+    private void ConfigOnRenamed(object source, RenamedEventArgs e)
+    {
+        _logger.LogInformation(
+            $"Config file renamed from {e.OldFullPath} to {e.FullPath}, Last Updated: {File.GetLastWriteTime(e.FullPath)}");
+        // Name file back to old path
+        File.Move(e.FullPath, e.OldFullPath);
+        _logger.LogError("Config file cannot be renamed. Reverting changes. Please stop NoteQuery Service to " +
+                         "rename the config file.");
+    }
+    #endregion
+
+    #region WatcherSetup
+    private void SetUpConfigWatcher()
+    {
+        var configPath = Path.GetFullPath(_configPath);
+        if (File.Exists(configPath))
+        {
+            var watcher = new FileSystemWatcher
+            {
+                Path = configPath.Substring(0,configPath.LastIndexOf('\\')),
+                NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName | NotifyFilters.DirectoryName,
+                Filter = Path.GetFileName(configPath)
+            };
+
+            // Event handlers
+            watcher.Changed += ConfigOnChanged;
+            watcher.Created += ConfigOnChanged;
+            watcher.Deleted += ConfigOnDeleted;
+            watcher.Renamed += ConfigOnRenamed;
+
+            // Start monitoring
+            watcher.EnableRaisingEvents = true;
+
+            // _watchers.Add(watcher);
+            _configWatcher = watcher;
+            _logger.LogInformation($"Started watching file: {_configPath}");
+        }
+        else
+        {
+            Console.WriteLine($"File {_configPath} does not exist.");
+            throw new FileNotFoundException("Config file does not exist.");
+        }
+    }
+
+    private void SetUpWatchers()
+    {
+        List<string> directoriesToWatch = [];
+        using (var sr = new StreamReader(_configPath))
+        {
+            while (sr.ReadLine() is { } line)
+            {
+                var values = line.Split(',');
+                directoriesToWatch.AddRange(values);
+            }
+        }
+        
+        foreach(var watcher in _watchers)
+        {
+            watcher.Dispose();
+        }
+        _watchers.Clear();
+        
+        foreach (var directory in directoriesToWatch)
+        {
+            if (Directory.Exists(directory))
+            {
+                var watcher = new FileSystemWatcher
+                {
+                    Path = directory,
+                    NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName,
+                    Filter = "*.*",
+                    IncludeSubdirectories = false
+                };
+
+                // Event handlers
+                watcher.Changed += OnChanged;
+                watcher.Created += OnChanged;
+                watcher.Deleted += OnChanged;
+                watcher.Renamed += OnRenamed;
+
+                // Start monitoring
+                watcher.EnableRaisingEvents = true;
+
+                _watchers.Add(watcher);
+                _logger.LogInformation($"Started watching directory: {directory}");
+            }
+            else
+            {
+                Console.WriteLine($"Directory {directory} does not exist.");
+            }
+        }
+    }
+    #endregion
+    
+    private void UpdateMongo(string path, ChangeType changeType)
+    {
+        switch(changeType)
+        {
+            case ChangeType.Created:
+                // Insert into MongoDB
+                break;
+            case ChangeType.Changed:
+                // Update MongoDB
+                break;
+            case ChangeType.Deleted:
+                // Delete from MongoDB
+                break;
+            case ChangeType.Renamed:
+                // Update MongoDB
+                break;
+            default:
+                throw new ArgumentOutOfRangeException();
+        }
+        // Update MongoDB
+        throw new NotImplementedException();
+    }
+    
     public override void Dispose()
     {
         foreach (var watcher in _watchers)
