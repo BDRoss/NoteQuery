@@ -133,3 +133,6 @@ $RECYCLE.BIN/
 .DS_Store
 
 _NCrunch*
+
+# Temporary test config file, do not check in
+/config.csv
