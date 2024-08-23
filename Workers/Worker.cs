@@ -4,6 +4,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Hosting;
 using Microsoft.VisualBasic;
 using Newtonsoft.Json;
+using NoteQuery.Services;
 
 namespace NoteQuery.Workers;
 
@@ -21,11 +22,13 @@ public class Worker : BackgroundService
     private FileSystemWatcher? _configWatcher;
     private readonly List<FileSystemWatcher> _watchers = [];
     private readonly string _configPath;
+    private MongoService _mongoService;
 
     public Worker(ILogger<Worker> logger, string configPath = ".\\config.csv")
     {
         _logger = logger;
         _configPath = configPath;
+        _mongoService = new MongoService();
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -182,13 +185,14 @@ public class Worker : BackgroundService
                 // Insert into MongoDB
                 break;
             case ChangeType.Changed:
-                // Update MongoDB
+                // Update MongoDB - Update any tags/fields
+                _mongoService.UpdateDocument(path);
                 break;
             case ChangeType.Deleted:
                 // Delete from MongoDB
                 break;
             case ChangeType.Renamed:
-                // Update MongoDB
+                // Update MongoDB - Update file path field
                 break;
             default:
                 throw new ArgumentOutOfRangeException();
