@@ -49,6 +49,16 @@ public class Worker : BackgroundService
     }
 
     #region FileSystemWatcher
+
+    private void OnCreated(object source, FileSystemEventArgs e)
+    {
+        // Ignoring changes to directories
+        if (!File.Exists(e.FullPath)) return;
+        _logger.LogInformation(
+            $"File: {e.FullPath} {e.ChangeType}, Last Updated: {File.GetLastWriteTime(e.FullPath)}");
+        UpdateMongo(e.FullPath, ChangeType.Created);
+    }
+    
     private void OnChanged(object source, FileSystemEventArgs e)
     {
         // Ignoring changes to directories
@@ -159,7 +169,7 @@ public class Worker : BackgroundService
 
                 // Event handlers
                 watcher.Changed += OnChanged;
-                watcher.Created += OnChanged;
+                watcher.Created += OnCreated;
                 watcher.Deleted += OnChanged;
                 watcher.Renamed += OnRenamed;
 
@@ -179,10 +189,12 @@ public class Worker : BackgroundService
     
     private void UpdateMongo(string path, ChangeType changeType)
     {
+        // Update MongoDB
         switch(changeType)
         {
             case ChangeType.Created:
                 // Insert into MongoDB
+                _mongoService.InsertDocument(path);
                 break;
             case ChangeType.Changed:
                 // Update MongoDB - Update any tags/fields
@@ -197,8 +209,6 @@ public class Worker : BackgroundService
             default:
                 throw new ArgumentOutOfRangeException();
         }
-        // Update MongoDB
-        throw new NotImplementedException();
     }
     
     public override void Dispose()
